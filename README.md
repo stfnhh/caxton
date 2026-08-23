@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/caxton.png" alt="Caxton" width="400">
+  <img src="docs/logo.png" alt="Caxton" width="400">
 </p>
 
 Caxton is a small, read-only OPDS 2.0 server for EPUB ebooks and M4B audiobooks. It scans a directory every five minutes by default, stores extracted metadata in SQLite, and caches embedded cover images as ordinary files. Books are parsed only when their path, size, or modification time changes.
