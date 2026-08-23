@@ -1,0 +1,28 @@
+# Local library content
+/books/
+/library/
+
+# Runtime data and cover cache
+/data/
+/covers/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+
+# Go build artifacts
+/caxton
+/bin/
+/.gocache/
+coverage.out
+
+# Local temporary files
+/tmp/
+*.log
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

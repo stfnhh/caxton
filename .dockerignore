@@ -1,0 +1,12 @@
+.git
+.gocache
+data
+library
+books
+tmp
+bin
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+.DS_Store
