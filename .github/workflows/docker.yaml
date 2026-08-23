@@ -1,0 +1,159 @@
+name: Release to GHCR
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version from tag
+        id: vars
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Build & push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.VERSION }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push=true
+
+      - name: Update GitHub Release with metadata
+        uses: actions/github-script@v7
+        env:
+          VERSION: ${{ steps.vars.outputs.VERSION }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          META: ${{ steps.build.outputs.metadata }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const tag = process.env.VERSION;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const manifestDigest = process.env.DIGEST;
+            const metadata = JSON.parse(process.env.META || "{}");
+            const platforms = metadata["containerimage.digest"] || [];
+
+            let release;
+            try {
+              release = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+            } catch {
+              release = await github.rest.repos.createRelease({
+                owner,
+                repo,
+                tag_name: tag,
+                name: tag,
+                draft: false,
+                prerelease: false,
+              });
+            }
+
+            let platformDetails = "";
+            if (Array.isArray(platforms)) {
+              platformDetails = platforms
+                .map((p) => `- \`${p.platform}\`: \`${p.digest}\``)
+                .join("\n");
+            }
+
+            const body = `# GHCR Release for ${tag}
+
+            Docker image successfully published to **GitHub Container Registry**.
+
+            ---
+
+            ## Image Information
+
+            **Image:** \`${process.env.IMAGE}\`
+            **Tag:** \`${tag}\`
+            **Manifest Digest:**
+            \`\`\`
+            ${manifestDigest}
+            \`\`\`
+
+            ---
+
+            ## Platforms Published
+
+            ${platformDetails || "_No per-platform digest data available._"}
+
+            ---
+
+            ## Pull Commands
+
+            Pull the versioned tag:
+            \`\`\`
+            docker pull ${process.env.IMAGE}:${tag}
+            \`\`\`
+
+            Pull the latest tag:
+            \`\`\`
+            docker pull ${process.env.IMAGE}:latest
+            \`\`\`
+
+            Pull by immutable digest:
+            \`\`\`
+            docker pull ${process.env.IMAGE}@${manifestDigest}
+            \`\`\`
+
+            ---
+
+            ## Inspect Image Metadata
+
+            Manifest list:
+            \`\`\`
+            docker manifest inspect ${process.env.IMAGE}:${tag}
+            \`\`\`
+
+            Specific architecture:
+            \`\`\`
+            docker manifest inspect ${process.env.IMAGE}@${manifestDigest}
+            \`\`\`
+
+            ---
+
+            ## OCI Metadata (from buildx)
+            \`\`\`json
+            ${JSON.stringify(metadata, null, 2)}
+            \`\`\`
+
+            ---
+
+            Generated automatically by GitHub Actions.
+            `;
+
+            await github.rest.repos.updateRelease({
+              owner,
+              repo,
+              release_id: release.data.id,
+              body,
+            });
