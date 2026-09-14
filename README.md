@@ -2,7 +2,7 @@
   <img src="docs/logo.png" alt="Caxton" width="400">
 </p>
 
-Caxton is a small, read-only OPDS 2.0 server for EPUB ebooks and M4B audiobooks. It scans a directory every five minutes by default, stores extracted metadata in SQLite, and caches embedded cover images as ordinary files. Books are parsed only when their path, size, or modification time changes.
+Caxton is a small, read-only OPDS 1.0 and 2.0 server for EPUB ebooks and M4B audiobooks. It scans a directory every five minutes by default, stores extracted metadata in SQLite, and caches embedded cover images as ordinary files. Books are parsed only when their path, size, or modification time changes.
 
 ## Run
 
@@ -10,7 +10,7 @@ Caxton is a small, read-only OPDS 2.0 server for EPUB ebooks and M4B audiobooks.
 go run ./cmd/caxton -library /path/to/books
 ```
 
-Open `http://localhost:8080/opds` in an OPDS 2.0 client.
+Open `http://localhost:8080/opds` in an OPDS 2.0 client, or `http://localhost:8080/opds1` in an OPDS 1.0 client. Both catalogs are always available; no configuration change is needed.
 
 Options can be flags or environment variables:
 
@@ -34,6 +34,8 @@ Feeds:
 - `/opds/audiobooks` — M4B publications
 - `/opds/search?query=...` — title, author, series, and genre search
 - `/healthz` — health check
+
+For OPDS 1.0 Atom/XML feeds, replace `/opds` with `/opds1` in the feed URLs above. `/opds1/search.xml` provides OpenSearch discovery. Both versions support the same browsing, filters, pagination, covers, and downloads.
 
 Publication feeds use 50 items per page by default. Use `page` and `per_page` to navigate or adjust the page size, up to 100 items. The scanner walks subdirectories recursively. Deleted files and their extracted covers are removed on the next successful scan.
 

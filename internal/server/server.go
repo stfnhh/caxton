@@ -35,6 +35,15 @@ func New(catalog *library.Catalog, baseURL string) http.Handler {
 	s.mux.HandleFunc("GET /opds/search", s.search)
 	s.mux.HandleFunc("GET /opds/ebooks", s.ebooks)
 	s.mux.HandleFunc("GET /opds/audiobooks", s.audiobooks)
+	s.mux.HandleFunc("GET /opds1", s.catalogFeed)
+	s.mux.HandleFunc("GET /opds1/books", s.allPublications)
+	s.mux.HandleFunc("GET /opds1/recent", s.recent)
+	s.mux.HandleFunc("GET /opds1/authors", s.authors)
+	s.mux.HandleFunc("GET /opds1/genres", s.genres)
+	s.mux.HandleFunc("GET /opds1/search", s.search)
+	s.mux.HandleFunc("GET /opds1/ebooks", s.ebooks)
+	s.mux.HandleFunc("GET /opds1/audiobooks", s.audiobooks)
+	s.mux.HandleFunc("GET /opds1/search.xml", s.openSearch)
 	s.mux.HandleFunc("GET /books/{id}", s.download)
 	s.mux.HandleFunc("GET /covers/{id}", s.cover)
 	s.mux.HandleFunc("GET /healthz", s.health)
@@ -74,7 +83,7 @@ func (s *Server) root(w http.ResponseWriter, r *http.Request) {
 func (s *Server) catalogFeed(w http.ResponseWriter, r *http.Request) {
 	base := s.requestBase(r)
 	items := s.catalog.Items("")
-	s.writeFeed(w, feed{
+	s.writeFeed(w, r, feed{
 		Metadata: metadata("Caxton", len(items)),
 		Links: []link{
 			{Href: base + "/opds", Type: feedType, Rel: "self"},
@@ -156,12 +165,16 @@ func (s *Server) navigationFeed(w http.ResponseWriter, r *http.Request, title st
 		target := base + "/opds/books?" + url.Values{parameter: []string{value}}.Encode()
 		navigation = append(navigation, link{Href: target, Type: feedType, Rel: "subsection", Title: value})
 	}
-	s.writeFeed(w, feed{Metadata: metadata(title, len(values)), Links: feedLinks(base, r), Navigation: navigation})
+	s.writeFeed(w, r, feed{Metadata: metadata(title, len(values)), Links: feedLinks(base, r), Navigation: navigation})
 }
 
 func (s *Server) publicationFeed(w http.ResponseWriter, r *http.Request, title string, items []library.Publication) {
 	base := s.requestBase(r)
 	page, perPage, pageItems := paginate(items, r)
+	if isOPDS1(r) {
+		s.writeAtomPublications(w, r, title, pageItems, page, perPage, len(items))
+		return
+	}
 	publications := make([]publication, 0, len(pageItems))
 	for _, item := range pageItems {
 		publications = append(publications, encodePublication(base, item))
@@ -169,7 +182,7 @@ func (s *Server) publicationFeed(w http.ResponseWriter, r *http.Request, title s
 	feedMetadata := metadata(title, len(items))
 	feedMetadata["itemsPerPage"] = perPage
 	feedMetadata["currentPage"] = page
-	s.writeFeed(w, feed{
+	s.writeFeed(w, r, feed{
 		Metadata:     feedMetadata,
 		Links:        paginationLinks(base, r, page, perPage, len(items)),
 		Publications: publications,
@@ -389,7 +402,11 @@ func (s *Server) requestBase(r *http.Request) string {
 	return scheme + "://" + r.Host
 }
 
-func (s *Server) writeFeed(w http.ResponseWriter, value feed) {
+func (s *Server) writeFeed(w http.ResponseWriter, r *http.Request, value feed) {
+	if isOPDS1(r) {
+		s.writeAtomNavigation(w, r, value)
+		return
+	}
 	w.Header().Set("Content-Type", feedType)
 	w.Header().Set("Cache-Control", "no-cache")
 	enc := json.NewEncoder(w)
