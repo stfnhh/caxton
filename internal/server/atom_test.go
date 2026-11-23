@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"encoding/xml"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -16,9 +17,13 @@ func TestOPDS1Routes(t *testing.T) {
 	for _, path := range []string{"", "/books", "/recent", "/authors", "/genres", "/ebooks", "/audiobooks", "/search?query=hello"} {
 		t.Run(path, func(t *testing.T) {
 			w := httptest.NewRecorder()
-			handler.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/opds1"+path, nil))
+			handler.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/opds/v1"+path, nil))
 			var f atomFeed
-			if w.Code != 200 || w.Header().Get("Content-Type") != atomType {
+			wantType := atomAcquisitionType
+			if path == "" || path == "/authors" || path == "/genres" {
+				wantType = atomNavigationType
+			}
+			if w.Code != 200 || w.Header().Get("Content-Type") != wantType {
 				t.Fatalf("unexpected response: %d %s", w.Code, w.Body.String())
 			}
 			if err := xml.Unmarshal(w.Body.Bytes(), &f); err != nil {
@@ -28,24 +33,41 @@ func TestOPDS1Routes(t *testing.T) {
 				t.Fatalf("missing Atom metadata: %#v", f)
 			}
 			for _, link := range append(f.Links, entryLinks(f.Entries)...) {
-				if !strings.HasPrefix(link.Href, "https://books.example/library/opds1") {
+				if !strings.HasPrefix(link.Href, "https://books.example/library/opds/v1") {
 					t.Errorf("wrong catalog link: %s", link.Href)
 				}
 			}
 			if path == "" && len(f.Entries) != 6 {
 				t.Fatalf("expected six navigation entries: %#v", f.Entries)
 			}
+			if path == "" {
+				if f.Entries[0].Content == nil || f.Entries[0].Content.Text == "" || f.Entries[0].Links[0].Rel != sortNewRel {
+					t.Fatalf("invalid recent navigation entry: %#v", f.Entries[0])
+				}
+			}
 		})
 	}
 	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/opds", nil))
-	if w.Header().Get("Content-Type") != feedType || !json.Valid(w.Body.Bytes()) {
+	handler.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/opds/v2", nil))
+	if w.Header().Get("Content-Type") != jsonFeedType || !json.Valid(w.Body.Bytes()) {
 		t.Fatal("OPDS 2 feed changed")
 	}
 	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/opds1/missing", nil))
+	handler.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/opds", nil))
+	if w.Code != http.StatusTemporaryRedirect || w.Header().Get("Location") != opdsV2Root {
+		t.Fatalf("unexpected /opds redirect: %d %q", w.Code, w.Header().Get("Location"))
+	}
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/opds/v1/missing", nil))
 	if w.Code != 404 {
 		t.Fatalf("unknown route status: %d", w.Code)
+	}
+	for _, oldPath := range []string{"/opds1", "/opds1/books", "/opds/books"} {
+		w = httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost"+oldPath, nil))
+		if w.Code != 404 {
+			t.Errorf("legacy route %s returned %d, want 404", oldPath, w.Code)
+		}
 	}
 }
 
@@ -62,7 +84,7 @@ func TestOPDS1PublicationAndPagination(t *testing.T) {
 	date := time.Date(2020, 1, 2, 0, 0, 0, 0, time.UTC)
 	for _, mediaType := range []string{"application/epub+zip", "audio/mp4"} {
 		item := library.Publication{ID: "abc", Title: "A & <Book>", Authors: []string{"A & B", "C"}, Genres: []string{"Fantasy"}, Description: "Words & <markup>", Modified: date, Published: &date, MediaType: mediaType, Size: 123, CoverType: "image/jpeg", Language: "en", Publisher: "Publisher", Series: "Series", Duration: 100}
-		r := httptest.NewRequest("GET", "http://localhost/opds1/books?author=A%26B&page=2&per_page=1", nil)
+		r := httptest.NewRequest("GET", "http://localhost/opds/v1/books?author=A%26B&page=2&per_page=1", nil)
 		w := httptest.NewRecorder()
 		s.writeAtomPublications(w, r, "Books", []library.Publication{item}, 2, 1, 3)
 		var f atomFeed
@@ -83,7 +105,7 @@ func TestOPDS1PublicationAndPagination(t *testing.T) {
 		for _, link := range f.Links {
 			seen[link.Rel] = true
 			if link.Rel == "next" || link.Rel == "prev" || link.Rel == "first" || link.Rel == "last" {
-				if !strings.Contains(link.Href, "/opds1/books?") || !strings.Contains(link.Href, "author=A%26B") {
+				if !strings.Contains(link.Href, "/opds/v1/books?") || !strings.Contains(link.Href, "author=A%26B") {
 					t.Fatalf("lost route/filter: %s", link.Href)
 				}
 			}
@@ -99,7 +121,7 @@ func TestOPDS1PublicationAndPagination(t *testing.T) {
 func TestOPDS1SearchDiscovery(t *testing.T) {
 	handler := New(&library.Catalog{}, "https://books.example")
 	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/opds1/search.xml", nil))
+	handler.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/opds/v1/search.xml", nil))
 	var description struct {
 		XMLName xml.Name
 		URL     struct {
@@ -110,13 +132,13 @@ func TestOPDS1SearchDiscovery(t *testing.T) {
 	if err := xml.Unmarshal(w.Body.Bytes(), &description); err != nil {
 		t.Fatal(err)
 	}
-	if w.Header().Get("Content-Type") != openSearchType || description.XMLName.Space != "http://a9.com/-/spec/opensearch/1.1/" || description.URL.Type != atomType {
+	if w.Header().Get("Content-Type") != openSearchType || description.XMLName.Space != "http://a9.com/-/spec/opensearch/1.1/" || description.URL.Type != atomAcquisitionType {
 		t.Fatalf("invalid search description: %s", w.Body.String())
 	}
 	url := strings.ReplaceAll(description.URL.Template, "{searchTerms}", "fantasy")
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, httptest.NewRequest("GET", url, nil))
-	if w.Code != 200 || w.Header().Get("Content-Type") != atomType {
+	if w.Code != 200 || w.Header().Get("Content-Type") != atomAcquisitionType {
 		t.Fatal("search template does not return Atom")
 	}
 }
@@ -124,13 +146,13 @@ func TestOPDS1SearchDiscovery(t *testing.T) {
 func TestOPDS1AuthorNavigation(t *testing.T) {
 	s := &Server{baseURL: "https://books.example"}
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "http://localhost/opds1/authors", nil)
+	r := httptest.NewRequest("GET", "http://localhost/opds/v1/authors", nil)
 	s.navigationFeed(w, r, "Authors", []string{"A & B"}, "author")
 	var f atomFeed
 	if err := xml.Unmarshal(w.Body.Bytes(), &f); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.Entries) != 1 || f.Entries[0].Title != "A & B" || f.Entries[0].Links[0].Href != "https://books.example/opds1/books?author=A+%26+B" {
+	if len(f.Entries) != 1 || f.Entries[0].Title != "A & B" || f.Entries[0].Links[0].Href != "https://books.example/opds/v1/books?author=A+%26+B" {
 		t.Fatalf("invalid author navigation: %#v", f.Entries)
 	}
 }

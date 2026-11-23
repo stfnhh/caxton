@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -16,7 +15,11 @@ import (
 	"caxton/internal/library"
 )
 
-const feedType = "application/opds+json"
+const (
+	opdsV1Root = "/opds/v1"
+	opdsV2Root = "/opds/v2"
+	sortNewRel = "http://opds-spec.org/sort/new"
+)
 
 type Server struct {
 	catalog *library.Catalog
@@ -27,49 +30,51 @@ type Server struct {
 func New(catalog *library.Catalog, baseURL string) http.Handler {
 	s := &Server{catalog: catalog, baseURL: strings.TrimRight(baseURL, "/"), mux: http.NewServeMux()}
 	s.mux.HandleFunc("GET /", s.root)
-	s.mux.HandleFunc("GET /opds", s.catalogFeed)
-	s.mux.HandleFunc("GET /opds/books", s.allPublications)
-	s.mux.HandleFunc("GET /opds/recent", s.recent)
-	s.mux.HandleFunc("GET /opds/authors", s.authors)
-	s.mux.HandleFunc("GET /opds/genres", s.genres)
-	s.mux.HandleFunc("GET /opds/search", s.search)
-	s.mux.HandleFunc("GET /opds/ebooks", s.ebooks)
-	s.mux.HandleFunc("GET /opds/audiobooks", s.audiobooks)
-	s.mux.HandleFunc("GET /opds1", s.catalogFeed)
-	s.mux.HandleFunc("GET /opds1/books", s.allPublications)
-	s.mux.HandleFunc("GET /opds1/recent", s.recent)
-	s.mux.HandleFunc("GET /opds1/authors", s.authors)
-	s.mux.HandleFunc("GET /opds1/genres", s.genres)
-	s.mux.HandleFunc("GET /opds1/search", s.search)
-	s.mux.HandleFunc("GET /opds1/ebooks", s.ebooks)
-	s.mux.HandleFunc("GET /opds1/audiobooks", s.audiobooks)
-	s.mux.HandleFunc("GET /opds1/search.xml", s.openSearch)
+	s.registerCatalog(opdsV1Root)
+	s.registerCatalog(opdsV2Root)
+	s.mux.HandleFunc("GET "+opdsV1Root+"/search.xml", s.openSearch)
+	s.mux.HandleFunc("GET "+opdsV2Root+"/publications/{id}", s.jsonPublication)
+	s.mux.HandleFunc("GET /opds", redirectTo(opdsV2Root, http.StatusTemporaryRedirect))
 	s.mux.HandleFunc("GET /books/{id}", s.download)
 	s.mux.HandleFunc("GET /covers/{id}", s.cover)
 	s.mux.HandleFunc("GET /healthz", s.health)
 	return s.mux
 }
 
-type link struct {
-	Href       string         `json:"href"`
-	Type       string         `json:"type,omitempty"`
-	Rel        any            `json:"rel,omitempty"`
-	Title      string         `json:"title,omitempty"`
-	Properties map[string]any `json:"properties,omitempty"`
-	Templated  bool           `json:"templated,omitempty"`
+func (s *Server) registerCatalog(root string) {
+	s.mux.HandleFunc("GET "+root, s.catalogFeed)
+	s.mux.HandleFunc("GET "+root+"/books", s.allPublications)
+	s.mux.HandleFunc("GET "+root+"/recent", s.recent)
+	s.mux.HandleFunc("GET "+root+"/authors", s.authors)
+	s.mux.HandleFunc("GET "+root+"/genres", s.genres)
+	s.mux.HandleFunc("GET "+root+"/search", s.search)
+	s.mux.HandleFunc("GET "+root+"/ebooks", s.ebooks)
+	s.mux.HandleFunc("GET "+root+"/audiobooks", s.audiobooks)
 }
 
-type feed struct {
-	Metadata     map[string]any `json:"metadata"`
-	Links        []link         `json:"links"`
-	Navigation   []link         `json:"navigation,omitempty"`
-	Publications []publication  `json:"publications,omitempty"`
+func redirectTo(target string, status int) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		location := target
+		if r.URL.RawQuery != "" {
+			location += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, location, status)
+	}
 }
 
-type publication struct {
-	Metadata map[string]any `json:"metadata"`
-	Links    []link         `json:"links"`
-	Images   []link         `json:"images,omitempty"`
+type catalogLink struct {
+	Href       string
+	Type       string
+	Rel        any
+	Title      string
+	Properties map[string]any
+	Templated  bool
+}
+
+type catalogFeed struct {
+	Metadata   map[string]any
+	Links      []catalogLink
+	Navigation []catalogLink
 }
 
 func (s *Server) root(w http.ResponseWriter, r *http.Request) {
@@ -82,21 +87,24 @@ func (s *Server) root(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) catalogFeed(w http.ResponseWriter, r *http.Request) {
 	base := s.requestBase(r)
+	root := catalogRoot(r)
+	navigationType := navigationFeedType(r)
+	publicationType := publicationFeedType(r)
 	items := s.catalog.Items("")
-	s.writeFeed(w, r, feed{
+	s.writeNavigationFeed(w, r, catalogFeed{
 		Metadata: metadata("Caxton", len(items)),
-		Links: []link{
-			{Href: base + "/opds", Type: feedType, Rel: "self"},
-			{Href: base + "/opds", Type: feedType, Rel: "start"},
-			{Href: base + "/opds/search{?query,title,author}", Type: feedType, Rel: "search", Templated: true},
+		Links: []catalogLink{
+			{Href: base + root, Type: navigationType, Rel: "self"},
+			{Href: base + root, Type: navigationType, Rel: "start"},
+			{Href: base + root + "/search{?query,title,author}", Type: publicationType, Rel: "search", Templated: true},
 		},
-		Navigation: []link{
-			{Href: base + "/opds/recent", Type: feedType, Rel: "subsection", Title: "Recently Added"},
-			{Href: base + "/opds/books", Type: feedType, Rel: "subsection", Title: "All Books"},
-			{Href: base + "/opds/authors", Type: feedType, Rel: "subsection", Title: "Authors"},
-			{Href: base + "/opds/genres", Type: feedType, Rel: "subsection", Title: "Genres"},
-			{Href: base + "/opds/ebooks", Type: feedType, Rel: "subsection", Title: "eBooks"},
-			{Href: base + "/opds/audiobooks", Type: feedType, Rel: "subsection", Title: "Audiobooks"},
+		Navigation: []catalogLink{
+			{Href: base + root + "/recent", Type: publicationType, Rel: sortNewRel, Title: "Recently Added"},
+			{Href: base + root + "/books", Type: publicationType, Rel: "subsection", Title: "All Books"},
+			{Href: base + root + "/authors", Type: navigationType, Rel: "subsection", Title: "Authors"},
+			{Href: base + root + "/genres", Type: navigationType, Rel: "subsection", Title: "Genres"},
+			{Href: base + root + "/ebooks", Type: publicationType, Rel: "subsection", Title: "eBooks"},
+			{Href: base + root + "/audiobooks", Type: publicationType, Rel: "subsection", Title: "Audiobooks"},
 		},
 	})
 }
@@ -160,104 +168,75 @@ func (s *Server) genres(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) navigationFeed(w http.ResponseWriter, r *http.Request, title string, values []string, parameter string) {
 	base := s.requestBase(r)
-	navigation := make([]link, 0, len(values))
+	root := catalogRoot(r)
+	mediaType := publicationFeedType(r)
+	navigation := make([]catalogLink, 0, len(values))
 	for _, value := range values {
-		target := base + "/opds/books?" + url.Values{parameter: []string{value}}.Encode()
-		navigation = append(navigation, link{Href: target, Type: feedType, Rel: "subsection", Title: value})
+		target := base + root + "/books?" + url.Values{parameter: []string{value}}.Encode()
+		navigation = append(navigation, catalogLink{Href: target, Type: mediaType, Rel: "subsection", Title: value})
 	}
-	s.writeFeed(w, r, feed{Metadata: metadata(title, len(values)), Links: feedLinks(base, r), Navigation: navigation})
+	s.writeNavigationFeed(w, r, catalogFeed{Metadata: metadata(title, len(values)), Links: feedLinks(base, r), Navigation: navigation})
 }
 
 func (s *Server) publicationFeed(w http.ResponseWriter, r *http.Request, title string, items []library.Publication) {
 	base := s.requestBase(r)
 	page, perPage, pageItems := paginate(items, r)
-	if isOPDS1(r) {
+	if usesAtom(r) {
 		s.writeAtomPublications(w, r, title, pageItems, page, perPage, len(items))
 		return
-	}
-	publications := make([]publication, 0, len(pageItems))
-	for _, item := range pageItems {
-		publications = append(publications, encodePublication(base, item))
 	}
 	feedMetadata := metadata(title, len(items))
 	feedMetadata["itemsPerPage"] = perPage
 	feedMetadata["currentPage"] = page
-	s.writeFeed(w, r, feed{
-		Metadata:     feedMetadata,
-		Links:        paginationLinks(base, r, page, perPage, len(items)),
-		Publications: publications,
-	})
+	writeJSONPublications(w, base, feedMetadata, paginationLinks(base, r, page, perPage, len(items)), pageItems)
 }
 
-func encodePublication(base string, item library.Publication) publication {
-	publicationType := "http://schema.org/Book"
-	if item.Kind == "ebook" {
-		publicationType = "http://schema.org/EBook"
-	} else if item.Kind == "audiobook" {
-		publicationType = "http://schema.org/Audiobook"
-	}
-	meta := map[string]any{"@type": publicationType, "identifier": "urn:caxton:" + item.ID, "title": item.Title, "modified": item.Modified.UTC().Format(time.RFC3339)}
-	if len(item.Authors) > 0 {
-		authors := make([]map[string]string, 0, len(item.Authors))
-		for _, name := range item.Authors {
-			authors = append(authors, map[string]string{"name": name})
-		}
-		meta["author"] = authors
-	}
-	if item.Description != "" {
-		meta["description"] = item.Description
-	}
-	if item.Language != "" {
-		meta["language"] = item.Language
-	}
-	if item.Publisher != "" {
-		meta["publisher"] = item.Publisher
-	}
-	if item.Published != nil {
-		meta["published"] = item.Published.UTC().Format(time.RFC3339)
-	}
-	if item.Duration > 0 {
-		meta["duration"] = item.Duration
-	}
-	if len(item.Genres) > 0 {
-		meta["subject"] = item.Genres
-	}
-	if item.Series != "" {
-		meta["belongsTo"] = map[string]any{"series": []map[string]string{{"name": item.Series}}}
-	}
-	links := []link{{
-		Href: base + "/books/" + item.ID, Type: item.MediaType,
-		Rel:        []string{"http://opds-spec.org/acquisition/open-access"},
-		Properties: map[string]any{"fileSize": item.Size},
-	}}
-	var images []link
-	if item.CoverType != "" {
-		images = append(images, link{
-			Href: base + "/covers/" + item.ID,
-			Type: item.CoverType,
-		})
-	}
-	return publication{Metadata: meta, Links: links, Images: images}
-}
-
-func feedLinks(base string, r *http.Request) []link {
-	return []link{
-		{Href: base + r.URL.RequestURI(), Type: feedType, Rel: "self"},
-		{Href: base + "/opds", Type: feedType, Rel: "start"},
+func feedLinks(base string, r *http.Request) []catalogLink {
+	return []catalogLink{
+		{Href: base + r.URL.RequestURI(), Type: currentFeedType(r), Rel: "self"},
+		{Href: base + catalogRoot(r), Type: navigationFeedType(r), Rel: "start"},
 	}
 }
 
-func paginationLinks(base string, r *http.Request, page, perPage, total int) []link {
+func catalogRoot(r *http.Request) string {
+	if usesAtom(r) {
+		return opdsV1Root
+	}
+	return opdsV2Root
+}
+
+func currentFeedType(r *http.Request) string {
+	if r.URL.Path == opdsV1Root || r.URL.Path == opdsV2Root || strings.HasSuffix(r.URL.Path, "/authors") || strings.HasSuffix(r.URL.Path, "/genres") {
+		return navigationFeedType(r)
+	}
+	return publicationFeedType(r)
+}
+
+func navigationFeedType(r *http.Request) string {
+	if usesAtom(r) {
+		return atomNavigationType
+	}
+	return jsonFeedType
+}
+
+func publicationFeedType(r *http.Request) string {
+	if usesAtom(r) {
+		return atomAcquisitionType
+	}
+	return jsonFeedType
+}
+
+func paginationLinks(base string, r *http.Request, page, perPage, total int) []catalogLink {
 	links := feedLinks(base, r)
 	if total <= perPage {
 		return links
 	}
 	last := (total + perPage - 1) / perPage
-	pageLink := func(target int, rel any) link {
+	pageLink := func(target int, rel any) catalogLink {
 		query := r.URL.Query()
 		query.Set("page", strconv.Itoa(target))
 		query.Set("per_page", strconv.Itoa(perPage))
-		return link{Href: base + r.URL.Path + "?" + query.Encode(), Type: feedType, Rel: rel}
+		return catalogLink{Href: base + r.URL.Path + "?" + query.Encode(), Type: publicationFeedType(r), Rel: rel}
 	}
 	links = append(links, pageLink(1, "first"), pageLink(last, "last"))
 	if page > 1 {
@@ -402,16 +381,10 @@ func (s *Server) requestBase(r *http.Request) string {
 	return scheme + "://" + r.Host
 }
 
-func (s *Server) writeFeed(w http.ResponseWriter, r *http.Request, value feed) {
-	if isOPDS1(r) {
+func (s *Server) writeNavigationFeed(w http.ResponseWriter, r *http.Request, value catalogFeed) {
+	if usesAtom(r) {
 		s.writeAtomNavigation(w, r, value)
 		return
 	}
-	w.Header().Set("Content-Type", feedType)
-	w.Header().Set("Cache-Control", "no-cache")
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(value); err != nil {
-		return
-	}
+	writeJSONNavigation(w, value)
 }

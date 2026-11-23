@@ -11,6 +11,8 @@ import (
 )
 
 const atomType = "application/atom+xml;profile=opds-catalog"
+const atomNavigationType = atomType + ";kind=navigation"
+const atomAcquisitionType = atomType + ";kind=acquisition"
 const openSearchType = "application/opensearchdescription+xml"
 
 type atomLink struct {
@@ -35,6 +37,7 @@ type atomEntry struct {
 	Updated    string         `xml:"updated"`
 	Authors    []atomAuthor   `xml:"author"`
 	Summary    *atomText      `xml:"summary,omitempty"`
+	Content    *atomText      `xml:"content,omitempty"`
 	Categories []atomCategory `xml:"category"`
 	Language   string         `xml:"http://purl.org/dc/terms/ language,omitempty"`
 	Publisher  string         `xml:"http://purl.org/dc/terms/ publisher,omitempty"`
@@ -53,24 +56,17 @@ type atomFeed struct {
 	Entries []atomEntry `xml:"entry"`
 }
 
-func isOPDS1(r *http.Request) bool {
-	return r.URL.Path == "/opds1" || strings.HasPrefix(r.URL.Path, "/opds1/")
+func usesAtom(r *http.Request) bool {
+	return r.URL.Path == opdsV1Root || strings.HasPrefix(r.URL.Path, opdsV1Root+"/")
 }
 
-func atomLinks(base string, links []link) []atomLink {
+func atomLinks(links []catalogLink) []atomLink {
 	result := make([]atomLink, 0, len(links))
 	for _, item := range links {
 		if item.Templated {
 			continue
 		}
 		href := item.Href
-		mediaType := item.Type
-		if mediaType == feedType {
-			mediaType = atomType
-			if href == base+"/opds" || strings.HasPrefix(href, base+"/opds/") {
-				href = base + "/opds1" + strings.TrimPrefix(href, base+"/opds")
-			}
-		}
 		var relations []string
 		switch rel := item.Rel.(type) {
 		case string:
@@ -82,26 +78,32 @@ func atomLinks(base string, links []link) []atomLink {
 			if rel == "previous" {
 				continue
 			}
-			result = append(result, atomLink{Href: href, Type: mediaType, Rel: rel})
+			result = append(result, atomLink{Href: href, Type: item.Type, Rel: rel})
 		}
 	}
 	return result
 }
 
-func (s *Server) newAtomFeed(r *http.Request, title string, links []link) atomFeed {
+func (s *Server) newAtomFeed(r *http.Request, title string, links []catalogLink) atomFeed {
 	base := s.requestBase(r)
-	converted := atomLinks(base, links)
-	converted = append(converted, atomLink{Href: base + "/opds1/search.xml", Type: openSearchType, Rel: "search"})
+	converted := atomLinks(links)
+	converted = append(converted, atomLink{Href: base + opdsV1Root + "/search.xml", Type: openSearchType, Rel: "search"})
 	return atomFeed{ID: base + r.URL.RequestURI(), Title: title, Updated: time.Now().UTC().Format(time.RFC3339), Author: atomAuthor{Name: "Caxton"}, Links: converted}
 }
 
-func (s *Server) writeAtomNavigation(w http.ResponseWriter, r *http.Request, value feed) {
+func (s *Server) writeAtomNavigation(w http.ResponseWriter, r *http.Request, value catalogFeed) {
 	f := s.newAtomFeed(r, value.Metadata["title"].(string), value.Links)
 	for _, item := range value.Navigation {
-		links := atomLinks(s.requestBase(r), []link{item})
-		f.Entries = append(f.Entries, atomEntry{ID: links[0].Href, Title: item.Title, Updated: f.Updated, Links: links})
+		links := atomLinks([]catalogLink{item})
+		f.Entries = append(f.Entries, atomEntry{
+			ID:      links[0].Href,
+			Title:   item.Title,
+			Updated: f.Updated,
+			Content: &atomText{Type: "text", Text: "Browse " + item.Title},
+			Links:   links,
+		})
 	}
-	writeXML(w, atomType, f)
+	writeXML(w, atomNavigationType, f)
 }
 
 func (s *Server) writeAtomPublications(w http.ResponseWriter, r *http.Request, title string, items []library.Publication, page, perPage, total int) {
@@ -110,7 +112,7 @@ func (s *Server) writeAtomPublications(w http.ResponseWriter, r *http.Request, t
 	for _, item := range items {
 		f.Entries = append(f.Entries, encodeAtomPublication(base, item))
 	}
-	writeXML(w, atomType, f)
+	writeXML(w, atomAcquisitionType, f)
 }
 
 func encodeAtomPublication(base string, item library.Publication) atomEntry {
@@ -147,8 +149,8 @@ func (s *Server) openSearch(w http.ResponseWriter, r *http.Request) {
 			Template string `xml:"template,attr"`
 		} `xml:"Url"`
 	}{ShortName: "Caxton", Description: "Search books by title, author, series, or genre"}
-	description.URL.Type = atomType
-	description.URL.Template = s.requestBase(r) + "/opds1/search?query={searchTerms}"
+	description.URL.Type = atomAcquisitionType
+	description.URL.Template = s.requestBase(r) + opdsV1Root + "/search?query={searchTerms}"
 	writeXML(w, openSearchType, description)
 }
 
